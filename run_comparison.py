@@ -4,155 +4,41 @@ import random
 import os
 import threading
 import time
+import json
+import shutil
 import matplotlib.pyplot as plt
+import numpy as np
+import sys
+
+# Έλεγχος για τη βιβλιοθήκη BPlusTree
+try:
+    from bplustree import BPlusTree
+    HAS_BPLUSTREE = True
+    print("[SYSTEM] BPlusTree library detected. Using Local Indexing on Disk.")
+except ImportError:
+    HAS_BPLUSTREE = False
+    print("[SYSTEM] WARNING: 'bplustree' not found. Using in-memory dicts.")
+
+# --- IMPORTS ΤΩΝ ΚΛΑΣΕΩΝ ---
+try:
+    from dht_node import Node as ChordNode
+    from pastry_node import PastryNode
+except ImportError as e:
+    print(f"[ERROR] Could not import node classes: {e}")
+    sys.exit(1)
 
 # =============================================================================
-# 1. CHORD NODE CLASS (Full Implementation)
+# HELPER FUNCTIONS
 # =============================================================================
-class ChordNode:
-    def __init__(self, ip, port, m=160):
-        self.ip = ip
-        self.port = port
-        self.m = m
-        self.id = self._generate_hash(f"{ip}:{port}")
-        self.storage = {} 
-        self.finger_table = [None] * m
-        self.successor = self
-        self.predecessor = None
-
-        for i in range(m):
-            self.finger_table[i] = self
-
-    def _generate_hash(self, key):
-        sha1 = hashlib.sha1(key.encode('utf-8'))
-        return int(sha1.hexdigest(), 16)
-
-    def _is_between(self, key, n1, n2, inclusive_end=False):
-        if n1 < n2:
-            return (n1 < key < n2) if not inclusive_end else (n1 < key <= n2)
-        else:
-            return (n1 < key) or (key < n2) if not inclusive_end else (n1 < key) or (key <= n2)
-
-    def find_successor(self, key):
-        if self._is_between(key, self.id, self.successor.id, inclusive_end=True):
-            return self.successor
-        else:
-            n_prime = self.closest_preceding_node(key)
-            if n_prime == self:
-                return self.successor
-            return n_prime.find_successor(key)
-
-    def closest_preceding_node(self, key):
-        for i in range(self.m - 1, -1, -1):
-            finger = self.finger_table[i]
-            if finger and self._is_between(finger.id, self.id, key):
-                return finger
-        return self
-
-    def _fix_fingers(self):
-        for i in range(self.m):
-            start = (self.id + 2**i) % (2**self.m)
-            self.finger_table[i] = self.find_successor(start)
-
-    def lookup_key(self, title):
-        """Thread-safe lookup wrapper for simulation"""
-        key = self._generate_hash(title)
-        # Simulation delay to make concurrency visible in logs/timing
-        time.sleep(random.uniform(0.1, 0.3)) 
-        
-        node = self.find_successor(key)
-        val = node.storage.get(key)
-        return val, node.id
-
-    # Dummy methods for consistency if called
-    def update_key(self, t, d): pass
-    def delete_key(self, t): pass
-
-# =============================================================================
-# 2. PASTRY NODE CLASS (Full Implementation)
-# =============================================================================
-class PastryNode:
-    def __init__(self, ip, port):
-        self.ip = ip
-        self.port = port
-        self.id_int = self._generate_hash(f"{ip}:{port}")
-        self.id_hex = format(self.id_int, '040x') 
-        self.storage = {} 
-        self.leaf_set = []      
-        self.routing_table = [] 
-
-    def _generate_hash(self, key):
-        sha1 = hashlib.sha1(key.encode('utf-8'))
-        return int(sha1.hexdigest(), 16)
-
-    def match_prefix_len(self, s1, s2):
-        length = 0
-        min_len = min(len(s1), len(s2))
-        for i in range(min_len):
-            if s1[i] == s2[i]: length += 1
-            else: break
-        return length
-
-    def route(self, key_hex):
-        if self.id_hex == key_hex: return self, 0
-        best_node = self
-        best_dist = abs(int(self.id_hex, 16) - int(key_hex, 16))
-        for node in self.leaf_set:
-            dist = abs(int(node.id_hex, 16) - int(key_hex, 16))
-            if dist < best_dist:
-                best_dist = dist
-                best_node = node
-        my_match_len = self.match_prefix_len(self.id_hex, key_hex)
-        candidate = best_node 
-        all_known = self.leaf_set + self.routing_table
-        for node in all_known:
-            node_match_len = self.match_prefix_len(node.id_hex, key_hex)
-            if node_match_len > my_match_len: return node, 1 
-            if node_match_len == my_match_len:
-                dist = abs(int(node.id_hex, 16) - int(key_hex, 16))
-                if dist < best_dist:
-                    best_dist = dist
-                    candidate = node
-        return candidate, 1
-
-    def lookup(self, key_hex, hop_count=0):
-        current_node = self
-        visited = {self.id_hex} 
-        while True:
-            next_node, _ = current_node.route(key_hex)
-            if next_node == current_node or next_node.id_hex in visited:
-                return current_node, hop_count
-            current_node = next_node
-            visited.add(current_node.id_hex)
-            hop_count += 1
-            if hop_count > 50: return current_node, hop_count
-
-    def insert_key(self, title, data):
-        key_int = self._generate_hash(title)
-        key_hex = format(key_int, '040x')
-        target_node, hops = self.lookup(key_hex)
-        target_node.storage[key_hex] = data
-
-    def lookup_key(self, title):
-        """Thread-safe lookup wrapper"""
-        key_int = self._generate_hash(title)
-        key_hex = format(key_int, '040x')
-        # Simulation delay
-        time.sleep(random.uniform(0.1, 0.3))
-        
-        target_node, hops = self.lookup(key_hex)
-        return target_node.storage.get(key_hex), hops
-        
-    # Dummy methods for consistency
-    def update_key(self, t, d): pass
-    def delete_key(self, t): pass
-
-# =============================================================================
-# 3. HELPER FUNCTIONS
-# =============================================================================
-def load_data_simple(filename, limit):
-    titles = []
+def load_data_full(filename, limit):
+    """Φορτώνει δεδομένα από το CSV αρχείο."""
+    loaded_items = []
     print(f"   -> Reading file '{filename}'...")
+    
+    if not os.path.exists(filename):
+        print(f"[WARN] File {filename} not found. Generating DUMMY data.")
+        return [(f"Movie {i}", {"popularity": str(i*10.5), "year": 2020+i}) for i in range(limit)]
+        
     try:
         with open(filename, mode='r', encoding='utf-8-sig', errors='replace') as f:
             line = f.readline()
@@ -161,156 +47,276 @@ def load_data_simple(filename, limit):
             reader = csv.DictReader(f, delimiter=delim)
             if reader.fieldnames:
                 reader.fieldnames = [h.strip().replace('"', '') for h in reader.fieldnames]
+            
             count = 0
             for row in reader:
                 if count >= limit: break
                 t = row.get('title') or row.get('original_title')
                 if t:
-                    titles.append(t.strip().replace('"', ''))
+                    title = t.strip().replace('"', '')
+                    loaded_items.append((title, dict(row)))
                     count += 1
     except Exception as e:
-        print(f"Error reading CSV: {e}")
+        print(f"[ERROR] Reading CSV: {e}")
         return []
-    print(f"   -> Loaded {len(titles)} titles.")
-    return titles
-
-# --- NEW: CONCURRENCY TEST FUNCTION  ---
-def run_concurrent_searches(protocol_name, node_list, queries):
-    """
-    Runs search queries concurrently using Threads.
-    Matches requirement: 'detect concurrently the popularities of the K-movies'
-    """
-    print(f"\n[CONCURRENCY TEST] Starting {len(queries)} concurrent threads for {protocol_name}...")
     
-    threads = []
-    results = []
+    print(f"   -> Loaded {len(loaded_items)} movies.")
+    return loaded_items
 
-    # Worker function for each thread
-    def search_worker(query, idx):
-        # print(f"    [Thread-{idx}] START searching for '{query}'")
+def run_concurrent_searches(node_list, queries):
+    """
+    Εκτελεί παράλληλες αναζητήσεις και τυπώνει το Popularity score
+    για να ικανοποιήσει την απαίτηση της εκφώνησης.
+    """
+    threads = []
+    results = {'hops': [], 'found': 0}
+    lock = threading.Lock()
+    
+    def search_worker(query):
+        # Τυχαία επιλογή κόμβου εκκίνησης για την αναζήτηση
         start_node = random.choice(node_list)
         
-        if protocol_name == "Chord":
-            val, node_id = start_node.lookup_key(query)
-            # print(f"    [Thread-{idx}] DONE. Found at Node {str(node_id)[:8]}...")
-        else:
-            val, hops = start_node.lookup_key(query)
-            # print(f"    [Thread-{idx}] DONE. Hops: {hops}")
+        # Network Lookup
+        val, hops = start_node.lookup_key(query)
         
-        results.append(val)
+        with lock:
+            results['hops'].append(hops)
+            if val: 
+                results['found'] += 1
+                # --- UPDATE: PRINT POPULARITY ---
+                # Τυπώνουμε το αποτέλεσμα για να δείξουμε ότι ανακτήθηκαν τα attributes
+                popularity = val.get('popularity', 'N/A')
+                print(f"      [SUCCESS] Key: '{query[:20]}...' | Hops: {hops} | Popularity: {popularity}")
+            else:
+                 pass # print(f"      [FAIL] Key: '{query[:20]}...' not found.")
 
-    # Launch threads
-    for i, q in enumerate(queries):
-        t = threading.Thread(target=search_worker, args=(q, i))
+    for q in queries:
+        t = threading.Thread(target=search_worker, args=(q,))
         threads.append(t)
         t.start()
 
-    # Wait for all threads to finish
     for t in threads:
         t.join()
-
-    print(f"[CONCURRENCY TEST] All {len(queries)} threads finished for {protocol_name}.")
+        
+    avg_hops = sum(results['hops'])/len(results['hops']) if results['hops'] else 0
+    print(f"      Total Found: {results['found']}/{len(queries)} | Avg Hops: {avg_hops:.2f}")
+    return avg_hops
 
 # =============================================================================
-# 4. MAIN EXPERIMENT
+# MAIN EXPERIMENT
 # =============================================================================
 def run_experiment():
-    NUM_NODES = 50
-    DATA_LIMIT = 200
+    NUM_NODES = 20  
+    DATA_LIMIT = 50 
     FILENAME = "movies.csv"
 
-    print(f"\n--- STARTING FULL PROJECT EXPERIMENT ({NUM_NODES} Nodes) ---")
+    storage_path = os.path.join(os.getcwd(), "node_storage")
+    if os.path.exists(storage_path):
+        try: shutil.rmtree(storage_path)
+        except: pass
+    time.sleep(1)
+
+    print(f"\n{'='*60}")
+    print(f"STARTING FULL DHT EVALUATION (LOG SCALE VIZ)")
+    print(f"{'='*60}")
     
-    # 1. Setup Chord
-    print("1. Initializing Chord...")
-    chord_nodes = [ChordNode("127.0.0.1", 5000 + i) for i in range(NUM_NODES)]
+    # ---------------------------------------------------------
+    # 1. SETUP NETWORKS
+    # ---------------------------------------------------------
+    print("\n[1] Initializing Networks (Sockets)...")
+    
+    # Chord Setup
+    print("    -> Setting up Chord ring (Localhost Ports 5000+)...")
+    chord_nodes = []
+    for i in range(NUM_NODES):
+        node = ChordNode("127.0.0.1", 5000 + i)
+        chord_nodes.append(node)
+    
+    # Manual Stabilization for Experiment Stability
     chord_nodes.sort(key=lambda x: x.id)
     for i in range(NUM_NODES):
-        chord_nodes[i].successor = chord_nodes[(i + 1) % NUM_NODES]
-    for node in chord_nodes: node._fix_fingers()
+        chord_nodes[i].successor = chord_nodes[(i + 1) % NUM_NODES].node_info
+        chord_nodes[i].predecessor = chord_nodes[(i - 1 + NUM_NODES) % NUM_NODES].node_info
+        for k in range(20):
+             chord_nodes[i].finger_table[k] = chord_nodes[(i + 2**k) % NUM_NODES].node_info
 
-    # 2. Setup Pastry
-    print("2. Initializing Pastry...")
-    pastry_nodes = [PastryNode("127.0.0.1", 6000 + i) for i in range(NUM_NODES)]
-    for node in pastry_nodes:
-        node.leaf_set = pastry_nodes[:] 
-        node.routing_table = pastry_nodes[:]
-
-    # 3. Load Data
-    titles = load_data_simple(FILENAME, DATA_LIMIT)
-    if not titles: return
-
-    print("   -> Inserting keys...")
-    for t in titles:
-        # Chord Insert
-        key = chord_nodes[0]._generate_hash(t)
-        chord_nodes[0].find_successor(key).storage[key] = {"title": t}
-        # Pastry Insert
-        pastry_nodes[0].insert_key(t, {"title": t})
-
-    # 4. Measure Hops (Sequential)
-    print("\n--- PHASE A: Hops Comparison (Sequential) ---")
-    test_queries = random.sample(titles, min(20, len(titles)))
+    # Pastry Setup
+    print("    -> Setting up Pastry network (Localhost Ports 6000+)...")
+    pastry_nodes = []
+    for i in range(NUM_NODES):
+        node = PastryNode("127.0.0.1", 6000 + i)
+        pastry_nodes.append(node)
     
-    chord_total = 0
-    pastry_total = 0
+    # Manual Leaf Set Setup for Experiment Stability
+    pastry_nodes.sort(key=lambda x: x.id_int)
+    for i in range(NUM_NODES):
+        prev_node = pastry_nodes[(i - 1 + NUM_NODES) % NUM_NODES].node_info
+        next_node = pastry_nodes[(i + 1) % NUM_NODES].node_info
+        pastry_nodes[i].leaf_set = [prev_node, next_node]
+
+    time.sleep(2) 
+
+    items = load_data_full(FILENAME, DATA_LIMIT)
+    if not items: return
+
+    times = {'Chord': {}, 'Pastry': {}}
     
-    for q in test_queries:
-        # Chord Hops
-        key = chord_nodes[0]._generate_hash(q)
-        steps = 0
-        curr = chord_nodes[random.randint(0, NUM_NODES-1)]
-        while not curr._is_between(key, curr.id, curr.successor.id, inclusive_end=True):
-            curr = curr.closest_preceding_node(key)
-            steps += 1
-            if steps > 50: break
-        chord_total += (steps + 1)
-
-        # Pastry Hops
-        start = pastry_nodes[random.randint(0, NUM_NODES-1)]
-        _, p_hops = start.lookup_key(q)
-        pastry_total += p_hops
-
-    avg_chord = chord_total / len(test_queries)
-    avg_pastry = pastry_total / len(test_queries)
+    # ---------------------------------------------------------
+    # 2. MEASURE INSERT
+    # ---------------------------------------------------------
+    print("\n[2] Measuring INSERT Performance...")
     
-    print(f"\nRESULTS:\nChord Avg Hops: {avg_chord:.2f}\nPastry Avg Hops: {avg_pastry:.2f}")
-
-    # 5. Concurrency Test 
-    print("\n--- PHASE B: Concurrency Test (Threads) ---")
-    concurrent_queries = random.sample(titles, 5) # Pick 5 random titles to search at once
-    print(f"Querying concurrently for: {concurrent_queries}")
+    start = time.time()
+    for title, data in items:
+        chord_nodes[0].insert_key(title, data)
+    times['Chord']['Insert'] = time.time() - start
+    print(f"    Chord Insert Time: {times['Chord']['Insert']:.4f}s")
     
-    # Run Chord Concurrent
-    start_time = time.time()
-    run_concurrent_searches("Chord", chord_nodes, concurrent_queries)
-    print(f"Chord Concurrent Time: {time.time() - start_time:.4f}s")
-    
-    # Run Pastry Concurrent
-    start_time = time.time()
-    run_concurrent_searches("Pastry", pastry_nodes, concurrent_queries)
-    print(f"Pastry Concurrent Time: {time.time() - start_time:.4f}s")
+    start = time.time()
+    for title, data in items:
+        pastry_nodes[0].insert_key(title, data)
+    times['Pastry']['Insert'] = time.time() - start
+    print(f"    Pastry Insert Time: {times['Pastry']['Insert']:.4f}s")
 
-    # 6. Plot
-    print("\n--- PHASE C: Generating Plot ---")
-    methods = ['Chord', 'Pastry']
-    hops = [avg_chord, avg_pastry]
-
+    # ---------------------------------------------------------
+    # 3. MEASURE LOOKUP
+    # ---------------------------------------------------------
+    print("\n[3] Measuring LOOKUP Performance (Concurrent)...")
     try:
-        plt.figure(figsize=(8, 6))
-        bars = plt.bar(methods, hops, color=['#3498db', '#e67e22'])
-        for bar in bars:
-            yval = bar.get_height()
-            plt.text(bar.get_x() + bar.get_width()/2, yval + 0.1, round(yval, 2), ha='center', va='bottom')
-        plt.ylabel('Average Hops')
-        plt.title(f'DHT Performance Comparison ({NUM_NODES} Nodes)')
-        save_path = os.path.join(os.getcwd(), 'dht_comparison.png')
-        plt.savefig(save_path)
-        print(f"SUCCESS! Plot saved at: {save_path}")
-        plt.show()
-    except Exception as e:
-        print(f"Error with plotting: {e}")
+        user_input = input("    Enter K (concurrent searches) [default=5]: ")
+        K = int(user_input) if user_input.strip() else 5
+    except: K = 5
+    
+    titles_only = [x[0] for x in items]
+    queries = random.sample(titles_only, min(K, len(titles_only)))
+    print(f"    Searching for {len(queries)} keys...")
+    
+    print(f"\n    --- Running Chord Lookups (K={K}) ---")
+    start = time.time()
+    chord_hops = run_concurrent_searches(chord_nodes, queries)
+    times['Chord']['Lookup'] = time.time() - start
+    
+    print(f"\n    --- Running Pastry Lookups (K={K}) ---")
+    start = time.time()
+    pastry_hops = run_concurrent_searches(pastry_nodes, queries)
+    times['Pastry']['Lookup'] = time.time() - start
+
+    # ---------------------------------------------------------
+    # 4. MEASURE JOIN
+    # ---------------------------------------------------------
+    print("\n[4] Measuring DYNAMIC JOIN...")
+    
+    print("    New Chord Node joining (Port 7000)...")
+    new_chord = ChordNode("127.0.0.1", 7000)
+    start = time.time()
+    new_chord.join(chord_nodes[0])
+    times['Chord']['Join'] = time.time() - start
+    chord_nodes.append(new_chord)
+    print(f"    Chord Join Time: {times['Chord']['Join']:.4f}s")
+
+    print("    New Pastry Node joining (Port 7000)...")
+    new_pastry = PastryNode("127.0.0.1", 7000)
+    start = time.time()
+    new_pastry.join(pastry_nodes[0])
+    times['Pastry']['Join'] = time.time() - start
+    pastry_nodes.append(new_pastry)
+    print(f"    Pastry Join Time: {times['Pastry']['Join']:.4f}s")
+
+    # ---------------------------------------------------------
+    # 5. MEASURE LEAVE
+    # ---------------------------------------------------------
+    print("\n[5] Measuring NODE LEAVE...")
+    
+    leaving_chord = chord_nodes[5]
+    print(f"    Chord Node {leaving_chord.port} leaving...")
+    start = time.time()
+    leaving_chord.leave()
+    times['Chord']['Leave'] = time.time() - start
+    if leaving_chord in chord_nodes: chord_nodes.remove(leaving_chord)
+    print(f"    Chord Leave Time: {times['Chord']['Leave']:.4f}s")
+
+    leaving_pastry = pastry_nodes[5]
+    print(f"    Pastry Node {leaving_pastry.port} leaving...")
+    start = time.time()
+    leaving_pastry.leave()
+    times['Pastry']['Leave'] = time.time() - start
+    if leaving_pastry in pastry_nodes: pastry_nodes.remove(leaving_pastry)
+    print(f"    Pastry Leave Time: {times['Pastry']['Leave']:.4f}s")
+
+    # ---------------------------------------------------------
+    # 6. UPDATE & DELETE
+    # ---------------------------------------------------------
+    print("\n[6] Measuring UPDATE...")
+    upd_key = queries[0]
+    
+    start = time.time()
+    # Ενημέρωση με διατήρηση του popularity για να είναι ρεαλιστικό
+    chord_nodes[0].update_key(upd_key, {"popularity": "99.9 (Updated)", "status": "updated"})
+    times['Chord']['Update'] = time.time() - start
+    print(f"    Chord Update Time: {times['Chord']['Update']:.4f}s")
+    
+    start = time.time()
+    pastry_nodes[0].update_key(upd_key, {"popularity": "99.9 (Updated)", "status": "updated"})
+    times['Pastry']['Update'] = time.time() - start
+    print(f"    Pastry Update Time: {times['Pastry']['Update']:.4f}s")
+
+    print("\n[7] Measuring DELETE...")
+    start = time.time()
+    chord_nodes[0].delete_key(upd_key)
+    times['Chord']['Delete'] = time.time() - start
+    print(f"    Chord Delete Time: {times['Chord']['Delete']:.4f}s")
+
+    start = time.time()
+    pastry_nodes[0].delete_key(upd_key)
+    times['Pastry']['Delete'] = time.time() - start
+    print(f"    Pastry Delete Time: {times['Pastry']['Delete']:.4f}s")
+
+    # ---------------------------------------------------------
+    # PLOTTING WITH LOG SCALE
+    # ---------------------------------------------------------
+    print("\n--- Generating Plots (Logarithmic) ---")
+    operations = ['Insert', 'Lookup', 'Join', 'Leave', 'Update', 'Delete']
+    
+    # Ensure no zero values for Log Plot (minimum 0.0001s)
+    chord_vals = [max(times['Chord'].get(op, 0), 0.0001) for op in operations]
+    pastry_vals = [max(times['Pastry'].get(op, 0), 0.0001) for op in operations]
+
+    x = np.arange(len(operations))
+    width = 0.35
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
+
+    # --- Plot 1: Logarithmic Time ---
+    rects1 = ax1.bar(x - width/2, chord_vals, width, label='Chord', color='blue')
+    rects2 = ax1.bar(x + width/2, pastry_vals, width, label='Pastry', color='orange')
+    
+    ax1.set_yscale('log') # Ενεργοποίηση Λογαριθμικής Κλίμακας
+    ax1.set_ylabel('Time (Seconds) - Log Scale')
+    ax1.set_title('Socket-based Performance (Log Scale)')
+    ax1.set_xticks(x)
+    ax1.set_xticklabels(operations)
+    ax1.legend()
+    ax1.grid(True, which="both", ls="--", linewidth=0.5, alpha=0.5)
+
+    # --- Plot 2: Hops (Linear) ---
+    ax2.bar(['Chord', 'Pastry'], [chord_hops, pastry_hops], color=['green', 'red'])
+    ax2.set_ylabel('Average Hops')
+    ax2.set_title(f'Lookup Hops (K={K})')
+
+    plt.tight_layout()
+    save_path = os.path.join(os.getcwd(), 'dht_full_comparison.png')
+    plt.savefig(save_path)
+    print(f"Plots saved as '{save_path}'")
+
+    print("Stopping Servers...")
+    try: new_chord.cleanup()
+    except: pass
+    try: new_pastry.cleanup()
+    except: pass
+    
+    for n in chord_nodes: n.cleanup()
+    for n in pastry_nodes: n.cleanup()
+    sys.exit(0)
 
 if __name__ == "__main__":
     run_experiment()
-    input("\nPress ENTER to exit...")
