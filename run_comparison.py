@@ -106,8 +106,8 @@ def run_concurrent_searches(node_list, queries):
 # MAIN EXPERIMENT
 # =============================================================================
 def run_experiment():
-    NUM_NODES = 20  
-    DATA_LIMIT = 50 
+    NUM_NODES = 30  
+    DATA_LIMIT = 100 
     FILENAME = "movies.csv"
 
     storage_path = os.path.join(os.getcwd(), "node_storage")
